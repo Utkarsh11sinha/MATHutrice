@@ -36,5 +36,6 @@ wheel-exclude = ["mathutrice/rag_documents"]
 
 [dependency-groups]
 dev = [
+    "pytest~=8.4",
     "tach~=0.35.0",
 ]

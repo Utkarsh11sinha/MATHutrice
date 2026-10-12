@@ -1,8 +1,19 @@
 import json
 import re
+import time
 
+import openai
+
+from mathutrice import llm_client
 from mathutrice.referentiel import REFERENTIEL
-from mathutrice.llm_client import client, MODEL
+from mathutrice.llm_client import MODEL
+
+# Hypothèse D (Issue #62) : un étudiant abandonne au bout de 5 min.
+DEADLINE_S = 300
+
+
+class EvaluationTimeout(Exception):
+    """L'échéance de l'évaluation est passée avant la fin de ses appels LLM."""
 
 
 def _build_flat_competences(referentiel):
@@ -30,6 +41,26 @@ def _parse_json(reponse_llm):
     if match:
         texte = match.group(0)
     return json.loads(texte)
+
+
+def _appeler_llm(client, deadline, prompt):
+    """
+    Un appel LLM sous l'échéance commune de l'évaluation : il ne reçoit que le
+    temps restant, sans nouvelle tentative (chacune repartirait de zéro et
+    dépasserait l'échéance). Aucun appel n'est lancé une fois l'échéance passée.
+    """
+    restant = deadline - time.monotonic()
+    if restant <= 0:
+        raise EvaluationTimeout("échéance de l'évaluation atteinte")
+    try:
+        response = client.with_options(
+            timeout=restant, max_retries=0
+        ).chat.completions.create(
+            model=MODEL, messages=[{"role": "user", "content": prompt}]
+        )
+    except openai.APITimeoutError as e:
+        raise EvaluationTimeout("échéance de l'évaluation atteinte") from e
+    return _parse_json(response.choices[0].message.content)
 
 
 # ─── PASSE 1 : Détection des compétences évaluées par l'exercice ─────────────
@@ -77,14 +108,11 @@ def prompt_detection(notion, enonce, reponse_correcte, toutes_competences):
     """
 
 
-def detecter_competences(notion, enonce, reponse_correcte):
+def detecter_competences(notion, enonce, reponse_correcte, *, client, deadline):
     """Passe 1 : identifie toutes les compétences que l'exercice évalue."""
     toutes_competences = _build_flat_competences(REFERENTIEL)
     prompt = prompt_detection(notion, enonce, reponse_correcte, toutes_competences)
-    response = client.chat.completions.create(
-        model=MODEL, messages=[{"role": "user", "content": prompt}]
-    )
-    return _parse_json(response.choices[0].message.content)
+    return _appeler_llm(client, deadline, prompt)
 
 
 # ─── PASSE 2 : Analyse des lacunes sur les compétences détectées ──────────────
@@ -185,6 +213,9 @@ def analyser_lacunes(
     competences_evaluees,
     nb_tentatives,
     dernieres_erreurs,
+    *,
+    client,
+    deadline,
 ):
     """Passe 2 : identifie les compétences non acquises, y compris hors passe 1."""
     toutes_competences = _build_flat_competences(REFERENTIEL)
@@ -199,10 +230,7 @@ def analyser_lacunes(
         nb_tentatives,
         dernieres_erreurs,
     )
-    response = client.chat.completions.create(
-        model=MODEL, messages=[{"role": "user", "content": prompt}]
-    )
-    return _parse_json(response.choices[0].message.content)
+    return _appeler_llm(client, deadline, prompt)
 
 
 def _build_competences_dict(competences_evaluees, diagnostic):
@@ -235,12 +263,21 @@ def diagnostiquer_depuis_competence(
     competence_cible,
     nb_tentatives=1,
     dernieres_erreurs="aucune",
+    client=None,
+    deadline=None,
 ):
     """
     Version allégée : saute la passe 1 car la compétence ciblée est déjà connue
     (fournie par choisir_competence). Fait uniquement la passe 2 pour confirmer
     la lacune et détecter d'éventuels gaps supplémentaires critiques.
+
+    Sans client ni échéance, utilise le client partagé et une échéance de
+    DEADLINE_S à partir de maintenant.
     """
+    if client is None:
+        client = llm_client.client
+    if deadline is None:
+        deadline = time.monotonic() + DEADLINE_S
     competence_avec_notion = {**competence_cible, "notion": notion}
     competences_evaluees = [competence_avec_notion]
     diagnostic = analyser_lacunes(
@@ -252,6 +289,8 @@ def diagnostiquer_depuis_competence(
         competences_evaluees,
         nb_tentatives,
         dernieres_erreurs,
+        client=client,
+        deadline=deadline,
     )
     competences_dict = _build_competences_dict(competences_evaluees, diagnostic)
     return {
@@ -272,17 +311,25 @@ def diagnostiquer(
     reponse_etudiant,
     nb_tentatives=1,
     dernieres_erreurs="aucune",
+    *,
+    client,
+    deadline,
 ):
     """
     Passe 1 : détecte les compétences évaluées par l'exercice (toutes notions).
     Passe 2 : identifie les lacunes parmi ces compétences.
+
+    Les deux passes utilisent `client` et partagent l'échéance `deadline`
+    (instant `time.monotonic()`) ; EvaluationTimeout si elle est atteinte.
 
     Retourne :
     - competences_evaluees : liste des compétences mobilisées
     - diagnostic           : diagnostic complet des lacunes
     - competences_dict     : {code: True/False} prêt pour update_scores()
     """
-    detection = detecter_competences(notion, enonce, reponse_correcte)
+    detection = detecter_competences(
+        notion, enonce, reponse_correcte, client=client, deadline=deadline
+    )
     competences_evaluees = detection.get("competences_evaluees", [])
 
     diagnostic = analyser_lacunes(
@@ -294,6 +341,8 @@ def diagnostiquer(
         competences_evaluees,
         nb_tentatives,
         dernieres_erreurs,
+        client=client,
+        deadline=deadline,
     )
 
     competences_dict = _build_competences_dict(competences_evaluees, diagnostic)
@@ -407,6 +456,8 @@ if __name__ == "__main__":
         ),
         nb_tentatives=1,
         dernieres_erreurs="aucune",
+        client=llm_client.client,
+        deadline=time.monotonic() + DEADLINE_S,
     )
 
     afficher_resultat(resultat)

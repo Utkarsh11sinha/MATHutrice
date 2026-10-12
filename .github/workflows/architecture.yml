@@ -15,3 +15,15 @@ jobs:
         run: |
           uv run tach check
           uv run python scripts/check_cycles.py
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install Project
+        run: uv sync --frozen
+      # The LLM settings are dummies set by tests/conftest.py; no test reaches a real endpoint.
+      - name: Run Tests
+        run: uv run pytest tests
