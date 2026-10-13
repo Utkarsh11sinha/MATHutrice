@@ -1,6 +1,7 @@
 import time
 from collections.abc import Callable
 
+import openai
 from openai import OpenAI
 
 # How long a student waits for an evaluation before giving up: assumption D of
@@ -33,5 +34,21 @@ class LLMDeadline:
         self._ends_at = clock() + seconds
 
     def complete(self, messages: list[dict]) -> str:
-        """The model's answer to `messages`, as text."""
-        raise NotImplementedError
+        """The model's answer to `messages`, as text.
+
+        The call gets only the time left before the deadline, and no retry: a
+        retry would start its own timeout over and outlast the deadline. Raises
+        `EvaluationTimeout` without calling the model once the deadline has
+        passed, or when the call runs out of time. Any other API error reaches
+        the caller as is.
+        """
+        remaining = self._ends_at - self._clock()
+        if remaining <= 0:
+            raise EvaluationTimeout("evaluation deadline reached")
+        try:
+            response = self._client.with_options(
+                timeout=remaining, max_retries=0
+            ).chat.completions.create(model=self._model, messages=messages)
+        except openai.APITimeoutError as timeout:
+            raise EvaluationTimeout("evaluation deadline reached") from timeout
+        return response.choices[0].message.content
