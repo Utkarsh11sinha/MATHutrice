@@ -1,3 +1,5 @@
+name: CI
+
 on:
   push:
   pull_request:
@@ -15,3 +17,16 @@ jobs:
         run: |
           uv run tach check
           uv run python scripts/check_cycles.py
+
+  # No `needs: architecture`: each job reports on its own, so a boundary
+  # violation never hides a failing test, and either can be required alone.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install Project
+        run: uv sync --frozen
+      - name: Run Tests
+        run: uv run pytest
