@@ -1,4 +1,4 @@
-from mathutrice.llm_client import client, MODEL
+from mathutrice.llm_client import client, MODEL, _missing
 
 system_prompt = """Tu es MATHutrice, une tutrice IA specialisee en mathematiques.
 
